@@ -5,6 +5,7 @@ use crate::xlib;
 
 use rodio::{Decoder, OutputStream, OutputStreamHandle, source::Source};
 use nix::libc;
+use arboard::Clipboard;
 
 use std::io::{self, Read, ErrorKind, Write};
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ struct Cell {
     height: i32,
 }
 
+#[derive(Clone, Copy)]
 struct Cursor {
     position: Position,
     save: Position,
@@ -37,7 +39,7 @@ struct Xft {
     font: *mut x11::xft::XftFont,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Position {
     x: i32,
     y: i32,
@@ -101,15 +103,21 @@ impl std::fmt::Debug for Character {
     }
 }
 
+#[derive(Debug)]
 struct ScrollingRegion {
     top: usize,
     bottom: usize,
 }
 
+#[derive(Clone, Copy)]
 struct Mode {
     decim: bool,
     decom: bool,
     decscnm: bool,
+    decckm: bool,
+    dectecm: bool,
+    decalt: bool,
+    decpaste: bool,
 }
 
 #[derive(PartialEq)]
@@ -117,6 +125,48 @@ enum CursorStyle {
     Block,
     Line,
     Underline,
+}
+
+#[derive(Clone)]
+struct AltScreen {
+    buf: Vec<Vec<Character>>,
+    attr: Attribute,
+    mode: Mode,
+    cursor: Cursor,
+}
+
+impl AltScreen {
+    pub fn new(config: &Config) -> AltScreen {
+        let attr = Attribute {
+            fg: config.fg,
+            bg: config.bg,
+        };
+
+        AltScreen {
+            cursor: Cursor {
+                position: Position {
+                    x: 0,
+                    y: 0,
+                },
+                save: Position {
+                    x: 0,
+                    y: 0,
+                },
+                scroll: 0,
+            },
+            attr,
+            mode: Mode {
+                decim: false,
+                decom: false,
+                decscnm: false,
+                decckm: false,
+                dectecm: true,
+                decalt: false,
+                decpaste: false,
+            },
+            buf: Vec::new(),
+        }
+    }
 }
 
 pub struct Terminal {
@@ -134,10 +184,13 @@ pub struct Terminal {
     pty: Pty,
     cursor_style: CursorStyle,
     scrolling_region: ScrollingRegion,
+    clipboard: Clipboard,
     buf: Vec<Vec<Character>>,
+    alt: AltScreen,
     tabs: Vec<bool>,
     refresh: bool,
     focused: bool,
+    scroll_set: bool,
 }
 
 impl Terminal {
@@ -170,7 +223,7 @@ impl Terminal {
     }
 
     fn execute(&mut self, byte: u8) {
-        println!("[execute] byte={:#x?}", byte);
+        // println!("[execute] byte={:#x?}", byte);
 
         match byte {
             0x09 => {
@@ -207,10 +260,12 @@ impl Terminal {
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], c: char) -> Result<(), Box<dyn std::error::Error>> {
+        /*
         println!(
             "[csi_dispatch] params={:?}, intermediates={:?}, char={:?}, x={}, y={}",
             params, intermediates, c, self.cursor.position.x, self.cursor.position.y
         );
+        */
 
         // thread::sleep(Duration::from_millis(100));
 
@@ -308,7 +363,7 @@ impl Terminal {
             },
             'S' => {
                 /*
-                 * these are implemented wrong as we need to use the scroll buffer to scroll
+                 * TODO: these are implemented wrong as we need to use the scroll buffer to scroll
                  * just like in L or M
                 */
                 self.cursor.scroll += *params.get(0).unwrap_or(&1) as i32;
@@ -375,16 +430,17 @@ impl Terminal {
                 self.cursor.position.y = (*params.get(0).unwrap_or(&1) as i32).max(1) - 1;
             },
             'm' => {
-                for param in params {
+                let mut index = 0;
+
+                while index < params.len() {
+                    let param = params.get(index).unwrap_or(&0);
+
                     match param {
                         0 => {
                             self.attr = Attribute {
                                 fg: self.config.fg,
                                 bg: self.config.bg,
                             };
-                        },
-                        39 => {
-                            self.attr.fg = self.config.fg;
                         },
                         22 => {
                             // set normal intensity
@@ -396,18 +452,22 @@ impl Terminal {
                             // set italic
                         },
                         7 => {
-                            let fg = self.attr.fg;
-
-                            self.attr.fg = self.attr.bg;
-                            self.attr.bg = fg;
+                            self.attr.fg = self.config.bg;
+                            self.attr.bg = self.config.fg;
                         },
+                        27 => {
+                            self.attr.fg = self.config.fg;
+                            self.attr.bg = self.config.bg;
+                        },
+                        39 => self.attr.fg = self.config.fg,
+                        49 => self.attr.bg = self.config.bg,
                         38 | 48 => {
-                            match params.get(1).unwrap_or(&2) {
+                            match params.get(index + 1).unwrap_or(&2) {
                                 2 => {
                                     let raw = xlib::Color::new(
-                                        *params.get(2).unwrap_or(&0) as u64,
-                                        *params.get(3).unwrap_or(&0) as u64,
-                                        *params.get(4).unwrap_or(&0) as u64,
+                                        *params.get(index + 2).unwrap_or(&0) as u64,
+                                        *params.get(index + 3).unwrap_or(&0) as u64,
+                                        *params.get(index + 4).unwrap_or(&0) as u64,
                                     );
 
                                     if let Ok(xft) = self.display.xft_color_alloc_name(raw) {
@@ -425,6 +485,8 @@ impl Terminal {
                                     } else {
                                         println!("[+] failed to create color: {:?}", raw);
                                     }
+
+                                    index += 4;
                                 },
                                 5 => {},
                                 mode => println!("[+] unimplemented SGR mode: {}", mode),
@@ -436,6 +498,8 @@ impl Terminal {
                         100..=107 => self.attr.bg = self.config.colors[*param as usize - 100],
                         _ => println!("[+] unknown SGR code: {}", param),
                     }
+
+                    index += 1;
                 }
             },
             'n' => {
@@ -464,7 +528,7 @@ impl Terminal {
             'u' => self.cursor.position = self.cursor.save,
             'h' => {
                 match *params.get(0).unwrap_or(&0) {
-                    1 => { /* DECCKM cursor key */ },
+                    1 => self.mode.decckm = true,
                     3 => { /* DECCOLM 80/132 col mode */ },
                     4 => self.mode.decim = true,
                     5 => self.mode.decscnm = true,
@@ -475,14 +539,21 @@ impl Terminal {
                     },
                     7 => { /* auto wrapping */ },
                     12 => { /* start blinking cursor */ },
-                    25 => { /* make cursor visible */ },
-                    1049 => { /* swap screen */ },
-                    2004 => { /* i dont even know what this code is lol */ },
+                    25 => self.mode.dectecm = true,
+                    1049 => {
+                        if !self.mode.decalt {
+                            self.switch_screen();
+
+                            self.mode.decalt = true;
+                        }
+                    },
+                    2004 => self.mode.decpaste = true,
                     param => println!("[+] unknown mode: {}", param),
                 }
             },
             'l' => {
                 match *params.get(0).unwrap_or(&0) {
+                    1 => self.mode.decckm = false,
                     4 => self.mode.decim = false,
                     5 => self.mode.decscnm = false,
                     6 => {
@@ -490,7 +561,16 @@ impl Terminal {
                         self.cursor.position = Position { x: 0, y: 0 };
                         self.mode.decom = false;
                     },
-                    _ => self.mode = Mode { decim: false, decom: false, decscnm: false },
+                    25 => self.mode.dectecm = false,
+                    1049 => {
+                        if self.mode.decalt {
+                            self.switch_screen();
+
+                            self.mode.decalt = false;
+                        }
+                    },
+                    2004 => self.mode.decpaste = false,
+                    param => println!("[+] unknown reset mode: {}", param),
                 }
             },
             'q' => {
@@ -511,6 +591,8 @@ impl Terminal {
                     x: 0,
                     y: 0,
                 };
+
+                self.scroll_set = !params.is_empty();
             },
             _ => {
                 println!(
@@ -531,10 +613,12 @@ impl Terminal {
         let prefix = intermediates.get(0).unwrap_or(&('q' as u8));
         let unknown: bool;
 
+        /*
         println!(
             "[esc_dispatch] intermediates={:?}, byte={}",
             intermediates.iter().map(|x| *x as char).collect::<Vec<char>>(), byte as char
         );
+        */
 
         match *prefix as char {
             '(' => {
@@ -619,6 +703,8 @@ impl Terminal {
             bg: config.bg,
         };
 
+        let alt = AltScreen::new(&config);
+
         Ok(Terminal {
             display,
             selection: Selection {
@@ -657,6 +743,10 @@ impl Terminal {
                 decim: false,
                 decom: false,
                 decscnm: false,
+                decckm: false,
+                dectecm: true,
+                decalt: false,
+                decpaste: false,
             },
             xft: Xft {
                 font,
@@ -664,14 +754,33 @@ impl Terminal {
             cursor_style: CursorStyle::Block,
             scrolling_region: ScrollingRegion {
                 top: 0,
-                bottom: window_attr.height as usize / 20,
+                bottom: window_attr.height as usize / 20 as usize,
             },
+            clipboard: Clipboard::new()?,
             pty: Pty::new()?,
             buf: Vec::new(),
+            alt,
             tabs: (0..DEFAULT_TAB_MAX).map(|x| x % 8 == 0).collect::<Vec<bool>>(),
             refresh: true,
             focused: true,
+            scroll_set: false,
         })
+    }
+
+    fn switch_screen(&mut self) {
+        let alt = self.alt.clone();
+
+        self.alt = AltScreen {
+            buf: self.buf.clone(),
+            cursor: self.cursor,
+            attr: self.attr,
+            mode: self.mode,
+        };
+
+        self.buf = alt.buf;
+        self.cursor = alt.cursor;
+        self.attr = alt.attr;
+        self.mode = alt.mode;
     }
 
     fn decom_clamp(&mut self) {
@@ -682,27 +791,117 @@ impl Terminal {
         }
     }
 
-    fn write_tty(&mut self, event: x11::xlib::XKeyEvent) -> Result<(), Box<dyn std::error::Error>> {
-        match self.display.keycode_to_keysym(event.keycode as u8) as u32 {
-            x11::keysym::XK_Up => { self.pty.file.write("\x1b[A".as_bytes())?; },
-            x11::keysym::XK_Down => { self.pty.file.write("\x1b[B".as_bytes())?; },
-            x11::keysym::XK_Left => { self.pty.file.write("\x1b[D".as_bytes())?; },
-            x11::keysym::XK_Right => { self.pty.file.write("\x1b[C".as_bytes())?; },
-            x11::keysym::XK_BackSpace => { self.pty.file.write("\x7f".as_bytes())?; },
-            x11::keysym::XK_F10 => { self.pty.file.write("\x1b[21~".as_bytes())?; },
-            x11::keysym::XK_Escape => { self.pty.file.write("\x1b".as_bytes())?; },
-            _ => {
-                let mut content = self.display.lookup_string(event)?;
+    fn handle_key(&mut self, event: x11::xlib::XKeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        let keysym = self.display.keycode_to_keysym(event.keycode as u8) as u32;
 
-                content = content.chars().filter(|x| *x != '\0').collect();
+        if is_cursor_key(keysym) {
+            let prefix = match self.mode.decckm {
+                true => "\x1bO",
+                false => "\x1b[",
+            };
 
-                if !content.is_empty() {
-                    self.pty.file.write_all(content.as_bytes())?;
+            let key = match keysym {
+                x11::keysym::XK_Up => "A",
+                x11::keysym::XK_Down => "B",
+                x11::keysym::XK_Left => "D",
+                x11::keysym::XK_Right => "C",
+                _ => unreachable!(),
+            };
+
+            if event.state != 0 {
+                // https://git.suckless.org/st/file/config.def.h.html#l327
+                self.pty.file.write(format!("\x1b[1;{}{}", event.state + 1, key).as_bytes())?;
+            } else {
+                self.pty.file.write(format!("{prefix}{key}").as_bytes())?;
+            }
+        } else if is_special_key(keysym) {
+            match keysym {
+                x11::keysym::XK_BackSpace => { self.pty.file.write("\x7f".as_bytes())?; },
+                x11::keysym::XK_F10 => { self.pty.file.write("\x1b[21~".as_bytes())?; },
+                x11::keysym::XK_Escape => { self.pty.file.write("\x1b".as_bytes())?; },
+                _ => {},
+            }
+        } else if keysym == x11::keysym::XK_c && event.state == 5 {
+            if let Some(selection) = self.get_selection() {
+                self.clipboard.set_text(selection)?;
+            }
+        } else if keysym == x11::keysym::XK_v && event.state == 5 {
+            if let Ok(selection) = self.clipboard.get_text() {
+                if self.mode.decpaste {
+                    self.write_tty_raw(&format!("\x1b[200~{}\x1b[201~", selection))?;
+                } else {
+                    self.write_tty_raw(&selection)?;
                 }
-            },
+            }
+        } else {
+            let mut content = self.display.lookup_string(event)?;
+
+            content = content.chars().filter(|x| *x != '\0').collect();
+
+            if !content.is_empty() {
+                self.pty.file.write_all(content.as_bytes())?;
+            }
         }
 
         Ok(())
+    }
+
+    fn get_line(&mut self, start: Position, end: Position) -> String {
+        self.alloc_area(start.x, start.y, 1, end.x - start.x);
+
+        self.buf[start.y as usize][start.x as usize..end.x as usize].iter().map(|c| c.byte).collect::<String>()
+    }
+
+    fn get_selection(&mut self) -> Option<String> {
+        if self.selection.start.y == self.selection.end.y {
+            return if self.selection.start.x > self.selection.end.x {
+                Some(self.get_line(self.selection.end, self.selection.start))
+            } else if self.selection.start.x < self.selection.end.x {
+                Some(self.get_line(self.selection.start, self.selection.end))
+            } else {
+                None
+            }
+        } else {
+            let selection = if self.selection.end.y > self.selection.start.y {
+                self.selection
+            } else {
+                Selection {
+                    start: self.selection.end,
+                    end: self.selection.start,
+                    selecting: false,
+                }
+            };
+
+            let mut content = String::new();
+
+            self.alloc_area(0, selection.start.y, selection.end.y - selection.start.y, 1);
+
+            for y in selection.start.y..=selection.end.y {
+                if y == selection.start.y {
+                    'start: for x in selection.start.x as usize..self.window.width as usize / self.cell.width as usize {
+                        if x < self.buf[selection.start.y as usize].len() {
+                            content.push(self.buf[selection.start.y as usize][x].byte);
+                        } else {
+                            break 'start;
+                        }
+                    }
+                } else if y == selection.end.y {
+                    'end: for x in 0..selection.end.x as usize {
+                        if x < self.buf[selection.end.y as usize].len() {
+                            content.push(self.buf[selection.end.y as usize][x].byte);
+                        } else {
+                            break 'end;
+                        }
+                    }
+                } else {
+                    content.extend(self.buf[y as usize].iter().map(|c| c.byte).collect::<Vec<char>>());
+                }
+
+                content.push('\n');
+            }
+
+            Some(content)
+        }
     }
 
     fn write_tty_raw(&mut self, content: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -781,7 +980,7 @@ impl Terminal {
     fn handle_event(&mut self, event: x11::xlib::XEvent) -> Result<(), Box<dyn std::error::Error>> {
         match unsafe { event.type_ } {
             x11::xlib::KeyPress => {
-                self.write_tty(unsafe { event.key })?;
+                self.handle_key(unsafe { event.key })?;
             },
             x11::xlib::ButtonPress => {
                 match unsafe { event.button.button } {
@@ -841,6 +1040,10 @@ impl Terminal {
 
                 self.display.resize_back_buffer(&self.window);
                 self.pty.resize(width as u16 / self.cell.width as u16, height as u16 / self.cell.height as u16)?;
+
+                if !self.scroll_set {
+                    self.scrolling_region.bottom = self.window.height as usize / self.cell.height as usize;
+                }
             },
             x11::xlib::VisibilityNotify => self.refresh = true,
             x11::xlib::FocusIn => {
@@ -936,37 +1139,40 @@ impl Terminal {
             }
         }
 
-        let width = match self.cursor_style {
-            CursorStyle::Block | CursorStyle::Underline => self.cell.width as u32,
-            CursorStyle::Line => 2,
-        };
 
-        let height = match self.cursor_style {
-            CursorStyle::Block | CursorStyle::Line => self.cell.height as u32,
-            CursorStyle::Underline => 5,
-        };
+        if self.mode.dectecm {
+            let width = match self.cursor_style {
+                CursorStyle::Block | CursorStyle::Underline => self.cell.width as u32,
+                CursorStyle::Line => 2,
+            };
 
-        let y = match self.cursor_style {
-            CursorStyle::Block | CursorStyle::Line => (self.cursor.position.y * self.cell.height) + self.cursor.scroll,
-            CursorStyle::Underline => (self.cursor.position.y * self.cell.height) + self.cursor.scroll + 15,
-        };
+            let height = match self.cursor_style {
+                CursorStyle::Block | CursorStyle::Line => self.cell.height as u32,
+                CursorStyle::Underline => 5,
+            };
 
-        if !self.focused && self.cursor_style == CursorStyle::Block {
-            self.display.outline_rec(
-                self.cursor.position.x * self.cell.width,
-                (self.cursor.position.y * self.cell.height) + self.cursor.scroll,
-                self.cell.width as u32 - 1,
-                self.cell.height as u32 - 1,
-                self.config.fg.raw,
-            );
-        } else {
-            self.display.draw_rec(
-                self.cursor.position.x * self.cell.width,
-                y,
-                width,
-                height,
-                self.config.fg.raw,
-            );
+            let y = match self.cursor_style {
+                CursorStyle::Block | CursorStyle::Line => (self.cursor.position.y * self.cell.height) + self.cursor.scroll,
+                CursorStyle::Underline => (self.cursor.position.y * self.cell.height) + self.cursor.scroll + 15,
+            };
+
+            if !self.focused && self.cursor_style == CursorStyle::Block {
+                self.display.outline_rec(
+                    self.cursor.position.x * self.cell.width,
+                    (self.cursor.position.y * self.cell.height) + self.cursor.scroll,
+                    self.cell.width as u32 - 1,
+                    self.cell.height as u32 - 1,
+                    self.config.fg.raw,
+                );
+            } else {
+                self.display.draw_rec(
+                    self.cursor.position.x * self.cell.width,
+                    y,
+                    width,
+                    height,
+                    self.config.fg.raw,
+                );
+            }
         }
 
         self.display.swap_buffers(&self.window);
@@ -1029,5 +1235,24 @@ impl Terminal {
     }
 }
 
+fn is_cursor_key(keysym: u32) -> bool {
+    matches!(
+        keysym,
+        x11::keysym::XK_Up
+        | x11::keysym::XK_Down
+        | x11::keysym::XK_Left
+        | x11::keysym::XK_Right
+    )
+}
+
+fn is_special_key(keysym: u32) -> bool {
+    matches!(
+        keysym,
+        x11::keysym::XK_Up
+        | x11::keysym::XK_BackSpace
+        | x11::keysym::XK_F10
+        | x11::keysym::XK_Escape
+    )
+}
 
 

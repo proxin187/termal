@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-echo -e "test2\033[6;10r\033[?6h\033[c"
+echo -e "test2\033[7m   test   2test3  hello\033[27m"
 
 # echo -e "\033[?6l"
 
