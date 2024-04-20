@@ -187,6 +187,7 @@ pub struct Terminal {
     clipboard: Clipboard,
     buf: Vec<Vec<Character>>,
     alt: AltScreen,
+    scrollback: Vec<Vec<Character>>,
     tabs: Vec<bool>,
     refresh: bool,
     focused: bool,
@@ -235,9 +236,7 @@ impl Terminal {
             },
             0x0a | 0x0b | 0x0c => {
                 if self.cursor.position.y as usize >= self.scrolling_region.bottom {
-                    self.buf.remove(self.scrolling_region.top);
-
-                    self.buf.insert(self.scrolling_region.bottom, vec![Character { byte: ' ', attr: self.attr }]);
+                    self.scroll_down();
                 } else {
                     self.cursor.position.y += 1;
                 }
@@ -362,14 +361,10 @@ impl Terminal {
                 self.cursor.position.x = (*params.get(0).unwrap_or(&1) as i32).max(1) - 1;
             },
             'S' => {
-                /*
-                 * TODO: these are implemented wrong as we need to use the scroll buffer to scroll
-                 * just like in L or M
-                */
-                self.cursor.scroll += *params.get(0).unwrap_or(&1) as i32;
+                self.scroll_up();
             },
             'T' => {
-                self.cursor.scroll -= *params.get(0).unwrap_or(&1) as i32;
+                self.scroll_down();
             },
             'L' => {
                 /*
@@ -631,9 +626,7 @@ impl Terminal {
                 match byte as char {
                     'M' => {
                         if self.cursor.position.y as usize <= self.scrolling_region.top {
-                            self.buf.remove(self.scrolling_region.bottom);
-
-                            self.buf.insert(self.scrolling_region.top, vec![Character { byte: ' ', attr: self.attr }]);
+                            self.scroll_up();
                         } else {
                             self.cursor.position.y -= 1;
                         }
@@ -760,6 +753,7 @@ impl Terminal {
             pty: Pty::new()?,
             buf: Vec::new(),
             alt,
+            scrollback: Vec::new(),
             tabs: (0..DEFAULT_TAB_MAX).map(|x| x % 8 == 0).collect::<Vec<bool>>(),
             refresh: true,
             focused: true,
@@ -781,6 +775,18 @@ impl Terminal {
         self.cursor = alt.cursor;
         self.attr = alt.attr;
         self.mode = alt.mode;
+    }
+
+    fn scroll_down(&mut self) {
+        self.scrollback.push(self.buf.remove(self.scrolling_region.top));
+
+        self.buf.insert(self.scrolling_region.bottom, vec![Character { byte: ' ', attr: self.attr }]);
+    }
+
+    fn scroll_up(&mut self) {
+        self.buf.remove(self.scrolling_region.bottom);
+
+        self.buf.insert(self.scrolling_region.top, vec![Character { byte: ' ', attr: self.attr }]);
     }
 
     fn decom_clamp(&mut self) {
@@ -949,11 +955,7 @@ impl Terminal {
 
     fn handle_bytes(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         for byte in bytes {
-            // println!("byte: {:?}", *byte as char);
-
             if let Ok(Some(action)) = self.parser.advance(*byte) {
-                // println!("action: {:?}", action);
-
                 match action {
                     Action::Print(c) => {
                         self.print(c);
@@ -990,7 +992,9 @@ impl Terminal {
                         self.refresh = true;
                     },
                     x11::xlib::Button5 => {
-                        self.cursor.scroll -= self.cell.height;
+                        if self.cursor.scroll > 0 {
+                            self.cursor.scroll -= self.cell.height;
+                        }
 
                         self.refresh = true;
                     },
@@ -1062,6 +1066,10 @@ impl Terminal {
 
     fn draw(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.display.draw_rec(0, 0, self.window.width, self.window.height, self.config.bg.raw);
+
+        if self.cursor.scroll > 0 {
+            // TODO: we need to render the scrollback here
+        }
 
         for (y, line) in self.buf.iter().enumerate() {
             let y_pos = (y as i32 * self.cell.height) + self.cursor.scroll;
@@ -1203,11 +1211,6 @@ impl Terminal {
         self.display.map_window();
         self.display.flush();
 
-        /*
-         * [ ] get htop and nvim to run properly
-         *
-        */
-
         unsafe {
             let flags = libc::fcntl(self.pty.file.as_raw_fd(), libc::F_GETFL, 0) | libc::O_NONBLOCK;
 
@@ -1217,7 +1220,7 @@ impl Terminal {
         loop {
             let render_time = Instant::now();
 
-            self.auto_scroll();
+            // self.auto_scroll();
             self.read_tty()?;
 
             if let Some(events) = self.display.poll_event() {

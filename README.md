@@ -14,3 +14,5 @@ Termal is a terminal emulator for x11 written in rust with a little more than 20
 - [ ] scroll buffer
 
 
+
+
