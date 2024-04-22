@@ -11,8 +11,12 @@ Termal is a terminal emulator for x11 written in rust with a little more than 20
 - [x] C0 control codes
 - [x] Custom CSI parser
 - [x] utf-8 support
-- [ ] scroll buffer
+- [x] scrollback
+- [x] copy/paste
 
+## Todos
+- [ ] screenshots mess up the window size
+- [ ] clickable urls
 
 
 

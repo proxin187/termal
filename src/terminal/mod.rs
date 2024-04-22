@@ -15,6 +15,7 @@ use std::fs::File;
 use std::thread;
 
 const DEFAULT_TAB_MAX: usize = 400;
+const SCROLLBACK_LEN: usize = 400;
 
 
 struct Cell {
@@ -39,7 +40,7 @@ struct Xft {
     font: *mut x11::xft::XftFont,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Position {
     x: i32,
     y: i32,
@@ -556,6 +557,7 @@ impl Terminal {
                         self.cursor.position = Position { x: 0, y: 0 };
                         self.mode.decom = false;
                     },
+                    7 => { /* auto wrapping */ },
                     25 => self.mode.dectecm = false,
                     1049 => {
                         if self.mode.decalt {
@@ -747,7 +749,7 @@ impl Terminal {
             cursor_style: CursorStyle::Block,
             scrolling_region: ScrollingRegion {
                 top: 0,
-                bottom: window_attr.height as usize / 20 as usize,
+                bottom: (window_attr.height as usize / 20 as usize) - 1,
             },
             clipboard: Clipboard::new()?,
             pty: Pty::new()?,
@@ -779,6 +781,10 @@ impl Terminal {
 
     fn scroll_down(&mut self) {
         self.scrollback.push(self.buf.remove(self.scrolling_region.top));
+
+        if self.scrollback.len() >= SCROLLBACK_LEN {
+            self.scrollback.remove(0);
+        }
 
         self.buf.insert(self.scrolling_region.bottom, vec![Character { byte: ' ', attr: self.attr }]);
     }
@@ -852,54 +858,65 @@ impl Terminal {
         Ok(())
     }
 
-    fn get_line(&mut self, start: Position, end: Position) -> String {
-        self.alloc_area(start.x, start.y, 1, end.x - start.x);
+    fn get_line(&mut self, buf: &Vec<Vec<Character>>, start: Position, end: Position) -> String {
+        if buf.len() > start.y as usize {
+            let length = buf[start.y as usize].len();
 
-        self.buf[start.y as usize][start.x as usize..end.x as usize].iter().map(|c| c.byte).collect::<String>()
+            buf[start.y as usize][(start.x as usize).min(length)..(end.x as usize).min(length)].iter().map(|c| c.byte).collect::<String>()
+        } else {
+            String::new()
+        }
     }
 
     fn get_selection(&mut self) -> Option<String> {
-        if self.selection.start.y == self.selection.end.y {
-            return if self.selection.start.x > self.selection.end.x {
-                Some(self.get_line(self.selection.end, self.selection.start))
-            } else if self.selection.start.x < self.selection.end.x {
-                Some(self.get_line(self.selection.start, self.selection.end))
+        let buf = [self.scrollback.clone(), self.buf.clone()].concat();
+
+        let mut start = Position {
+            x: self.selection.start.x,
+            y: self.selection.start.y + self.scrollback.len() as i32,
+        };
+
+        let mut end = Position {
+            x: self.selection.end.x,
+            y: self.selection.end.y + self.scrollback.len() as i32,
+        };
+
+        if start.y == end.y {
+            return if start.x > end.x {
+                Some(self.get_line(&buf, end, start))
+            } else if start.x < end.x {
+                Some(self.get_line(&buf, start, end))
             } else {
                 None
             }
         } else {
-            let selection = if self.selection.end.y > self.selection.start.y {
-                self.selection
-            } else {
-                Selection {
-                    start: self.selection.end,
-                    end: self.selection.start,
-                    selecting: false,
-                }
-            };
+            if end.y < start.y {
+                let old_start = start;
+
+                start = end;
+                end = old_start;
+            }
 
             let mut content = String::new();
 
-            self.alloc_area(0, selection.start.y, selection.end.y - selection.start.y, 1);
-
-            for y in selection.start.y..=selection.end.y {
-                if y == selection.start.y {
-                    'start: for x in selection.start.x as usize..self.window.width as usize / self.cell.width as usize {
-                        if x < self.buf[selection.start.y as usize].len() {
-                            content.push(self.buf[selection.start.y as usize][x].byte);
+            for y in start.y..=end.y {
+                if y == start.y && self.buf.len() as i32 > y {
+                    'start: for x in start.x as usize..self.window.width as usize / self.cell.width as usize {
+                        if x < self.buf[start.y as usize].len() {
+                            content.push(self.buf[start.y as usize][x].byte);
                         } else {
                             break 'start;
                         }
                     }
-                } else if y == selection.end.y {
-                    'end: for x in 0..selection.end.x as usize {
-                        if x < self.buf[selection.end.y as usize].len() {
-                            content.push(self.buf[selection.end.y as usize][x].byte);
+                } else if y == end.y && self.buf.len() as i32 > y {
+                    'end: for x in 0..end.x as usize {
+                        if x < self.buf[end.y as usize].len() {
+                            content.push(self.buf[end.y as usize][x].byte);
                         } else {
                             break 'end;
                         }
                     }
-                } else {
+                } else if self.buf.len() as i32 > y {
                     content.extend(self.buf[y as usize].iter().map(|c| c.byte).collect::<Vec<char>>());
                 }
 
@@ -940,6 +957,11 @@ impl Terminal {
     }
 
     fn alloc_area(&mut self, x: i32, y: i32, height: i32, width: i32) {
+        /*
+         * TODO: alloc_area causes rapid memory leak if negative values are passed
+         *
+        */
+
         if y as usize >= self.buf.len() {
             for _ in self.buf.len()..y as usize + height as usize {
                 self.buf.push(Vec::new());
@@ -999,14 +1021,17 @@ impl Terminal {
                         self.refresh = true;
                     },
                     x11::xlib::Button1 => {
+                        let raw = unsafe { event.button.y - self.cursor.scroll };
+                        let y = raw.is_negative().then(|| raw - self.cell.height).unwrap_or(raw) / self.cell.height;
+
                         self.selection.start = Position {
                             x: unsafe { event.button.x } / self.cell.width,
-                            y: unsafe { event.button.y - self.cursor.scroll } / self.cell.height,
+                            y,
                         };
 
                         self.selection.end = Position {
                             x: unsafe { event.button.x } / self.cell.width,
-                            y: unsafe { event.button.y - self.cursor.scroll } / self.cell.height,
+                            y,
                         };
 
                         self.selection.selecting = true;
@@ -1025,9 +1050,12 @@ impl Terminal {
             },
             x11::xlib::MotionNotify => {
                 if self.selection.selecting {
+                    let raw = unsafe { event.motion.y - self.cursor.scroll };
+                    let y = raw.is_negative().then(|| raw - self.cell.height).unwrap_or(raw) / self.cell.height;
+
                     self.selection.end = Position {
                         x: unsafe { event.motion.x } / self.cell.width,
-                        y: unsafe { event.motion.y - self.cursor.scroll } / self.cell.height,
+                        y,
                     };
 
                     self.refresh = true;
@@ -1046,7 +1074,7 @@ impl Terminal {
                 self.pty.resize(width as u16 / self.cell.width as u16, height as u16 / self.cell.height as u16)?;
 
                 if !self.scroll_set {
-                    self.scrolling_region.bottom = self.window.height as usize / self.cell.height as usize;
+                    self.scrolling_region.bottom = (self.window.height as usize / self.cell.height as usize) - 1;
                 }
             },
             x11::xlib::VisibilityNotify => self.refresh = true,
@@ -1067,12 +1095,10 @@ impl Terminal {
     fn draw(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.display.draw_rec(0, 0, self.window.width, self.window.height, self.config.bg.raw);
 
-        if self.cursor.scroll > 0 {
-            // TODO: we need to render the scrollback here
-        }
+        let buf = [self.scrollback.clone(), self.buf.clone()].concat();
 
-        for (y, line) in self.buf.iter().enumerate() {
-            let y_pos = (y as i32 * self.cell.height) + self.cursor.scroll;
+        for (y, line) in buf.iter().enumerate().rev() {
+            let y_pos = (y as i32 * self.cell.height) + self.cursor.scroll - (self.scrollback.len() as i32 * self.cell.height);
 
             if (0..self.window.height as i32).contains(&y_pos) {
                 for (x, character) in line.iter().enumerate() {
@@ -1088,7 +1114,7 @@ impl Terminal {
                         self.display.xft_draw_string(
                             character.byte.to_string().as_str(),
                             x as i32 * self.cell.width,
-                            (y as i32 * self.cell.height) + 15 + self.cursor.scroll,
+                            y_pos + 15,
                             self.xft.font,
                             &character.attr.fg.xft,
                         );
@@ -1190,20 +1216,6 @@ impl Terminal {
         Ok(())
     }
 
-    fn auto_scroll(&mut self) {
-        let scroll = -(self.cursor.scroll);
-
-        if self.cursor.position.y * self.cell.height > scroll + self.window.height as i32 - self.cell.height {
-            self.cursor.scroll = -((self.cursor.position.y * self.cell.height) - self.window.height as i32 + self.cell.height);
-
-            self.refresh = true;
-        } else if self.cursor.position.y * self.cell.height < scroll {
-            self.cursor.scroll = -(self.cursor.position.y * self.cell.height);
-
-            self.refresh = true;
-        }
-    }
-
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.display.set_window_name("termal");
         self.display.define_cursor();
@@ -1220,7 +1232,6 @@ impl Terminal {
         loop {
             let render_time = Instant::now();
 
-            // self.auto_scroll();
             self.read_tty()?;
 
             if let Some(events) = self.display.poll_event() {
