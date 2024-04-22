@@ -684,7 +684,15 @@ impl Terminal {
     pub fn new() -> Result<Terminal, Box<dyn std::error::Error>> {
         let mut display = xlib::Display::open()?;
 
-        let font = display.load_font("DejaVu Sans Mono:size=11:antialias=true")?;
+        // TODO: the issue must be with fonts
+        // https://git.suckless.org/st/file/x.c.html#l919
+        //
+        // we need to load nerd fonts
+        //
+        // the fix was nerd fonts :)
+
+        // let font = display.load_font("DejaVu Sans Mono:size=11:antialias=true")?;
+        let font = display.load_font("Iosevka Nerd Font Mono:style=Regular")?;
         let window_attr = display.get_window_attributes();
 
         let (_stream, stream_handle) = OutputStream::try_default()?;
