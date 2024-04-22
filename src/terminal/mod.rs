@@ -656,12 +656,19 @@ impl Terminal {
 
                         unknown = false;
                     },
+                    'c' => {
+                        self.buf.drain(..);
+                        self.cursor.position.x = 0;
+                        self.cursor.position.y = 0;
+
+                        unknown = false;
+                    },
                     'B' | '6' => unknown = false,
                     '8' => {
                         self.buf = vec![vec![Character { byte: 'E', attr: self.attr }; self.window.width as usize / self.cell.width as usize];
                             self.window.height as usize / self.cell.height as usize];
 
-                        unknown = false
+                        unknown = false;
                     },
                     _ => unknown = true,
                 }
