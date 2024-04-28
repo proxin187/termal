@@ -7,7 +7,7 @@ description = "Termal is a terminal emulator for x11"
 readme = "README.md"
 authors = ["Prox"]
 repository = "https://github.com/proxin187/termal"
-keywords = ["terminal", "emulator", "shell", "command line", "x11"]
+keywords = ["terminal", "emulator", "shell", "command", "x11"]
 categories = ["command-line-utilities", "emulators", "gui"]
 license = "MIT OR Apache-2.0"
 
