@@ -6,7 +6,7 @@ use std::ffi;
 use std::ptr;
 use std::mem;
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub struct Color {
     r: u64,
     g: u64,
@@ -291,22 +291,29 @@ impl Display {
         }
     }
 
-    pub fn xft_color_alloc_name(&self, rgb: Color) -> Result<xft::XftColor, Box<dyn std::error::Error>> {
-        let hex = rgb.hex();
+    pub fn xft_color_alloc_value(&self, rgb: Color) -> Result<xft::XftColor, Box<dyn std::error::Error>> {
+        // convert 8bit rgb to 16bit rgb
+
+        let xrender_color = x11::xrender::XRenderColor {
+            red: rgb.r as u16 * 257,
+            green: rgb.g as u16 * 257,
+            blue: rgb.b as u16 * 257,
+            alpha: 0xffff,
+        };
 
         unsafe {
             let mut color: xft::XftColor = mem::zeroed();
 
-            let result = xft::XftColorAllocName(
+            let result = xft::XftColorAllocValue(
                 self.dpy,
                 xlib::XDefaultVisual(self.dpy, self.screen),
                 xlib::XDefaultColormap(self.dpy, self.screen),
-                self.null_terminate(&hex).as_ptr() as *const i8,
+                &xrender_color,
                 &mut color,
             );
 
             if result == 0 {
-                Err("XftColorAllocName failed".into())
+                Err("XftColorAllocValue failed".into())
             } else {
                 Ok(color)
             }

@@ -9,7 +9,7 @@ use terminal::Terminal;
 use std::process;
 
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = match Terminal::new() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -23,15 +23,6 @@ fn main() {
         process::exit(1);
     }
 
-    /*
-    let bytes = b"before\x1b[22A\nbetween\x1b[54;9H\x1b$(Cafter";
-    let mut parser = escape::Parser::new();
-
-    for byte in bytes {
-        if let Ok(Some(action)) = parser.advance(*byte) {
-            println!("action: {:?}", action);
-        }
-    }
-    */
+    Ok(())
 }
 

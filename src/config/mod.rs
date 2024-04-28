@@ -11,8 +11,22 @@ pub struct UniColor {
     pub xft: x11::xft::XftColor,
 }
 
+impl PartialEq for UniColor {
+    fn eq(&self, other: &UniColor) -> bool {
+        self.raw == other.raw
+    }
+
+    fn ne(&self, other: &UniColor) -> bool {
+        self.raw != other.raw
+    }
+}
+
 pub struct Config {
     pub colors: Vec<UniColor>,
+    pub tab_max: usize,
+    pub scrollback: usize,
+    pub font: String,
+    pub bell: String,
     pub fg: UniColor,
     pub bg: UniColor,
 }
@@ -39,25 +53,33 @@ impl Config {
 
             Ok(Config {
                 colors: Self::load_colors(display, Self::get_colors(&config, colors)?.iter().map(|x| x.as_str()).collect::<Vec<&str>>())?,
+                tab_max: Self::get_int(&config, "tab_max", 400),
+                scrollback: Self::get_int(&config, "scrollback", 400),
+                font: Self::get_str(&config, "font", "Iosevka Nerd Font Mono:style=Regular"),
+                bell: Self::get_str(&config, "bell", "assets/pluh.wav"),
                 fg: UniColor {
                     raw: fg,
-                    xft: display.xft_color_alloc_name(fg)?,
+                    xft: display.xft_color_alloc_value(fg)?,
                 },
                 bg: UniColor {
                     raw: bg,
-                    xft: display.xft_color_alloc_name(bg)?,
+                    xft: display.xft_color_alloc_value(bg)?,
                 },
             })
         } else {
             Ok(Config {
                 colors: Self::load_colors(display, colors)?,
+                tab_max: 400,
+                scrollback: 400,
+                font: String::from("Iosevka Nerd Font Mono:style=Regular"),
+                bell: String::from("assets/pluh.wav"),
                 fg: UniColor {
                     raw: xlib::Color::from_str("d7-e0-da")?,
-                    xft: display.xft_color_alloc_name(xlib::Color::from_str("d7-e0-da")?)?,
+                    xft: display.xft_color_alloc_value(xlib::Color::from_str("d7-e0-da")?)?,
                 },
                 bg: UniColor {
                     raw: xlib::Color::from_str("0d-16-17")?,
-                    xft: display.xft_color_alloc_name(xlib::Color::from_str("0d-16-17")?)?,
+                    xft: display.xft_color_alloc_value(xlib::Color::from_str("0d-16-17")?)?,
                 },
             })
         }
@@ -69,7 +91,7 @@ impl Config {
         for color in colors {
             let raw = xlib::Color::from_str(color)?;
 
-            unicolors.push(UniColor { raw, xft: display.xft_color_alloc_name(raw)? });
+            unicolors.push(UniColor { raw, xft: display.xft_color_alloc_value(raw)? });
         }
 
         Ok(unicolors)

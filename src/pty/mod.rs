@@ -40,6 +40,8 @@ impl Pty {
         builder.env_remove("LINES");
         builder.env_remove("COLUMNS");
 
+        builder.env("TERM", "xterm-kitty");
+
         unsafe {
             builder.pre_exec(move || {
                 if libc::setsid() == -1 {
