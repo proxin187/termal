@@ -3,6 +3,14 @@ name = "termal"
 version = "0.1.0"
 edition = "2021"
 
+description = "Termal is a terminal emulator for x11"
+readme = "README.md"
+authors = ["Prox"]
+repository = "https://github.com/proxin187/termal"
+keywords = ["terminal", "emulator", "shell", "command line", "x11"]
+categories = ["command-line-utilities", "emulators", "gui"]
+license = "MIT OR Apache-2.0"
+
 [features]
 default = ["debugger"]
 debugger = []
