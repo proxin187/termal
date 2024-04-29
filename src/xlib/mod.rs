@@ -240,11 +240,24 @@ impl Display {
         text: &str,
         x: i32,
         y: i32,
+        height: u32,
+        width: u32,
         font: *mut xft::XftFont,
         color: *const xft::XftColor,
     ) {
         unsafe {
+            let rectangle = xlib::XRectangle {
+                x: 0,
+                y: 0,
+                height: height as u16,
+                width: width as u16,
+            };
+
+            xft::XftDrawSetClipRectangles(self.draw, x, y - 15, &rectangle, 1);
+
             xft::XftDrawStringUtf8(self.draw, color, font, x, y, self.null_terminate(text).as_ptr(), text.len() as i32);
+
+            xft::XftDrawSetClip(self.draw, ptr::null_mut());
         }
     }
 
@@ -264,8 +277,8 @@ impl Display {
     pub fn xft_draw_glyph(
         &mut self,
         glyph: u32,
-        x: i16,
-        y: i16,
+        x: i32,
+        y: i32,
         font: *mut xft::XftFont,
         color: *const xft::XftColor,
     ) {
@@ -273,8 +286,8 @@ impl Display {
             let specs = xft::XftGlyphFontSpec {
                 font,
                 glyph,
-                x,
-                y,
+                x: x as i16,
+                y: y as i16,
             };
 
             xft::XftDrawGlyphFontSpec(self.draw, color, &specs, 1);

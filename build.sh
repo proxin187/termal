@@ -1,6 +1,6 @@
 
 
 cargo build --release
-cp target/release/termal /usr/bin/termal
+cp target/release/termal-term /usr/bin/termal
 
 

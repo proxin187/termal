@@ -116,6 +116,8 @@ struct Mode {
     decalt: bool,
     decpaste: bool,
     decfocus: bool,
+    decmm: bool,
+    decdm: bool,
 }
 
 #[derive(PartialEq)]
@@ -161,8 +163,32 @@ impl AltScreen {
                 decalt: false,
                 decpaste: false,
                 decfocus: false,
+                decmm: false,
+                decdm: false,
             },
             buf: vec![vec![Character { attr, byte: ' ' }; (width / 10) + 1]; (height / 20) + 1],
+        }
+    }
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Buttons {
+    Button1,
+    Button2,
+    ScrollUp,
+    ScrollDown,
+    None,
+}
+
+impl Buttons {
+    pub fn as_code(&self) -> usize {
+        // https://tintin.mudhalla.net/info/xterm/
+        match self {
+            Buttons::Button1 => 0,
+            Buttons::Button2 => 1,
+            Buttons::ScrollUp => 64,
+            Buttons::ScrollDown => 65,
+            Buttons::None => 0,
         }
     }
 }
@@ -173,6 +199,7 @@ pub struct Screen {
     cursor: Cursor,
     window: Window,
     config: Config,
+    buttons: Buttons,
     audio: Audio,
     attr: Attribute,
     cell: Cell,
@@ -184,7 +211,6 @@ pub struct Screen {
     clipboard: Clipboard,
     buf: Vec<Vec<Character>>,
     alt: AltScreen,
-    // scrollback: Vec<Vec<Character>>,
     dirty: Vec<Vec<bool>>,
     tabs: Vec<bool>,
     refresh: bool,
@@ -574,6 +600,9 @@ impl Screen {
                     12 => { /* start blinking cursor */ },
                     25 => self.mode.dectecm = true,
                     1004 => self.mode.decfocus = true,
+                    1000 => { /* normal mouse tracking */ },
+                    1002 => self.mode.decmm = true,
+                    1006 => self.mode.decdm = true,
                     1049 => {
                         if !self.mode.decalt {
                             self.switch_screen();
@@ -598,6 +627,8 @@ impl Screen {
                     7 => { /* auto wrapping */ },
                     25 => self.mode.dectecm = false,
                     1004 => self.mode.decfocus = false,
+                    1002 => self.mode.decmm = false,
+                    1006 => self.mode.decdm = false,
                     1049 => {
                         if self.mode.decalt {
                             self.switch_screen();
@@ -720,6 +751,8 @@ impl Screen {
                         self.buf = vec![vec![Character { byte: 'E', attr: self.attr }; (self.window.width as usize / self.cell.width as usize) + 1];
                             (self.window.height as usize / self.cell.height as usize) + 1];
 
+                        self.full_dirt();
+
                         unknown = false;
                     },
                     _ => unknown = true,
@@ -838,6 +871,8 @@ impl Screen {
         Ok(())
     }
 
+    // TODO: clean up these functions, they are ugly af
+
     fn get_line(&mut self, buf: &Vec<Vec<Character>>, start: Position, end: Position) -> String {
         if buf.len() > start.y as usize {
             let length = buf[start.y as usize].len();
@@ -908,6 +943,36 @@ impl Screen {
         Ok(())
     }
 
+    #[inline]
+    fn mouse_tracking(&self) -> bool {
+        self.mode.decmm || self.mode.decdm
+    }
+
+    fn handle_mouse_motion(&mut self, x: i32, y: i32, type_: i32) -> Result<(), Box<dyn std::error::Error>> {
+        if (self.mode.decmm && self.buttons != Buttons::None && self.mode.decdm) || (!self.mode.decmm && self.mode.decdm) {
+            let suffix = match type_ {
+                x11::xlib::ButtonRelease => "m",
+                _ => "M",
+            };
+
+            self.write_tty_raw(
+                format!(
+                    "\x1b[<{};{};{}{}",
+                    if type_ == x11::xlib::MotionNotify {
+                        32
+                    } else {
+                        self.buttons.as_code()
+                    },
+                    (x / self.cell.width) + 1,
+                    (y / self.cell.height) + 1,
+                    suffix,
+                ).as_str()
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn handle_event(&mut self, event: x11::xlib::XEvent) -> Result<(), Box<dyn std::error::Error>> {
         match unsafe { event.type_ } {
             x11::xlib::KeyPress => {
@@ -916,45 +981,80 @@ impl Screen {
             x11::xlib::ButtonPress => {
                 match unsafe { event.button.button } {
                     x11::xlib::Button4 => {
-                        self.write_tty_raw("\x19")?;
+                        self.buttons = Buttons::ScrollUp;
+
+                        if !self.mouse_tracking() {
+                            self.write_tty_raw("\x19")?;
+                        } else {
+                            self.handle_mouse_motion(unsafe { event.button.x }, unsafe { event.button.y }, x11::xlib::ButtonPress)?;
+                        }
 
                         self.refresh = true;
                     },
                     x11::xlib::Button5 => {
-                        self.write_tty_raw("\x05")?;
+                        self.buttons = Buttons::ScrollDown;
+
+                        if !self.mouse_tracking() {
+                            self.write_tty_raw("\x05")?;
+                        } else {
+                            self.handle_mouse_motion(unsafe { event.button.x }, unsafe { event.button.y }, x11::xlib::ButtonPress)?;
+                        }
 
                         self.refresh = true;
                     },
                     x11::xlib::Button1 => {
-                        let raw = unsafe { event.button.y };
-                        let y = raw.is_negative().then(|| raw - self.cell.height).unwrap_or(raw) / self.cell.height;
+                        self.buttons = Buttons::Button1;
 
-                        self.selection.start = Position {
-                            x: unsafe { event.button.x } / self.cell.width,
-                            y,
-                        };
+                        if !self.mouse_tracking() {
+                            let raw = unsafe { event.button.y };
+                            let y = raw.is_negative().then(|| raw - self.cell.height).unwrap_or(raw) / self.cell.height;
 
-                        self.selection.end = Position {
-                            x: unsafe { event.button.x } / self.cell.width,
-                            y,
-                        };
+                            self.selection.start = Position {
+                                x: unsafe { event.button.x } / self.cell.width,
+                                y,
+                            };
 
-                        self.selection.selecting = true;
-                        self.refresh = true;
+                            self.selection.end = Position {
+                                x: unsafe { event.button.x } / self.cell.width,
+                                y,
+                            };
+
+                            self.selection.selecting = true;
+                            self.refresh = true;
+                        } else {
+                            self.handle_mouse_motion(unsafe { event.button.x }, unsafe { event.button.y }, x11::xlib::ButtonPress)?;
+                        }
+                    },
+                    x11::xlib::Button2 => {
+                        self.buttons = Buttons::Button2;
+
+                        if self.mouse_tracking() {
+                            self.handle_mouse_motion(unsafe { event.button.x }, unsafe { event.button.y }, x11::xlib::ButtonPress)?;
+                        }
                     },
                     _ => {},
                 }
             },
             x11::xlib::ButtonRelease => {
                 match unsafe { event.button.button } {
-                    x11::xlib::Button1 => {
-                        self.selection.selecting = false;
+                    x11::xlib::Button1 | x11::xlib::Button2 | x11::xlib::Button4 | x11::xlib::Button5 => {
+                        if unsafe { event.button.button } == x11::xlib::Button1 {
+                            self.selection.selecting = false;
+                        }
+
+                        if self.mouse_tracking() {
+                            self.handle_mouse_motion(unsafe { event.button.x }, unsafe { event.button.y }, x11::xlib::ButtonRelease)?;
+                        }
+
+                        self.buttons = Buttons::None;
                     },
                     _ => {},
                 }
             },
             x11::xlib::MotionNotify => {
-                if self.selection.selecting {
+                if self.mouse_tracking() {
+                    self.handle_mouse_motion(unsafe { event.motion.x }, unsafe { event.motion.y }, x11::xlib::MotionNotify)?;
+                } else if self.selection.selecting {
                     let raw = unsafe { event.motion.y };
                     let y = raw.is_negative().then(|| raw - self.cell.height).unwrap_or(raw) / self.cell.height;
 
@@ -985,7 +1085,7 @@ impl Screen {
 
                     self.display.resize_back_buffer(&self.window);
                     self.pty.resize(width as u16 / self.cell.width as u16, height as u16 / self.cell.height as u16)?;
-                    self.dirty = vec![vec![true; (width as usize / self.cell.width as usize) + 1]; (height as usize / self.cell.height as usize) + 1];
+                    self.full_dirt();
 
                     let default_ch = Character { attr: Attribute { fg: self.config.fg, bg: self.config.bg }, byte: ' ' };
 
@@ -1070,6 +1170,9 @@ impl Screen {
             selection.start.x = end;
         }
 
+        let width = self.window.width / self.cell.width as u32;
+        let height = self.window.height / self.cell.height as u32;
+
         for (y, line) in self.buf.iter().enumerate().rev() {
             let y_pos = y as i32 * self.cell.height;
 
@@ -1100,6 +1203,8 @@ impl Screen {
                             character.byte.to_string().as_str(),
                             x as i32 * self.cell.width,
                             y_pos + 15,
+                            height,
+                            width,
                             self.xft.font,
                             if is_within_selection {
                                 &character.attr.bg.xft
@@ -1203,6 +1308,7 @@ impl Terminal {
                     width: window_attr.width as u32,
                     height: window_attr.height as u32,
                 },
+                buttons: Buttons::None,
                 attr,
                 config,
                 audio: Audio {
@@ -1223,6 +1329,8 @@ impl Terminal {
                     decalt: false,
                     decpaste: false,
                     decfocus: false,
+                    decmm: false,
+                    decdm: false,
                 },
                 xft: Xft {
                     font,
@@ -1302,6 +1410,8 @@ impl Terminal {
         self.screen.display.select_input();
         self.screen.display.map_window();
         self.screen.display.flush();
+
+        // TODO: clean up mode and button handling
 
         unsafe {
             let flags = libc::fcntl(self.screen.pty.file.as_raw_fd(), libc::F_GETFL, 0) | libc::O_NONBLOCK;

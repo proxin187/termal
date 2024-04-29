@@ -24,7 +24,6 @@ impl PartialEq for UniColor {
 pub struct Config {
     pub colors: Vec<UniColor>,
     pub tab_max: usize,
-    pub scrollback: usize,
     pub font: String,
     pub bell: String,
     pub fg: UniColor,
@@ -54,7 +53,6 @@ impl Config {
             Ok(Config {
                 colors: Self::load_colors(display, Self::get_colors(&config, colors)?.iter().map(|x| x.as_str()).collect::<Vec<&str>>())?,
                 tab_max: Self::get_int(&config, "tab_max", 400),
-                scrollback: Self::get_int(&config, "scrollback", 400),
                 font: Self::get_str(&config, "font", "Iosevka Nerd Font Mono:style=Regular"),
                 bell: Self::get_str(&config, "bell", "assets/pluh.wav"),
                 fg: UniColor {
@@ -70,7 +68,6 @@ impl Config {
             Ok(Config {
                 colors: Self::load_colors(display, colors)?,
                 tab_max: 400,
-                scrollback: 400,
                 font: String::from("Iosevka Nerd Font Mono:style=Regular"),
                 bell: String::from("assets/pluh.wav"),
                 fg: UniColor {

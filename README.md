@@ -12,6 +12,7 @@ Termal is not supposed to be the fastest terminal emulator nor the best, termal 
 - [x] Custom CSI parser
 - [x] utf-8 support
 - [x] copy/paste
+- [x] mouse tracking
 
 ## Installation
 Termal is installed from source with `build.sh`.
